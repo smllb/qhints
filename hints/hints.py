@@ -13,7 +13,7 @@ from gi import require_version
 from hints.backends.atspi import AtspiBackend
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.backends.opencv import OpenCV
-from hints.constants import KEYBOARD_POSITIONS
+from hints.constants import KEYBOARD_ZONES
 from hints.huds.interceptor import InterceptorWindow
 from hints.huds.overlay import OverlayWindow
 from hints.mouse import click
@@ -117,25 +117,20 @@ def display_gtk_window(
     Gtk.main()
 
 
-def _hint_screen_position(hint_str: str) -> tuple[float, float]:
-    """Compute the target screen position for a hint string.
+def _get_zone(rx: float, ry: float, width: float, height: float) -> tuple[int, int]:
+    """Map a child's relative position to a 3x3 screen zone.
 
-    Maps keyboard key positions to screen coordinates using harmonically-weighted
-    averaging so the first character dominates (defines the broad screen zone)
-    and subsequent characters refine within it.
-
-    :param hint_str: The hint string, e.g. "a" or "ah".
-    :return: Normalized (x, y) target position in [0, 1] range.
+    :param rx: Relative x position of the child.
+    :param ry: Relative y position of the child.
+    :param width: Window width.
+    :param height: Window height.
+    :return: (row, col) zone indices, each in 0..2.
     """
-    tx, ty = 0.0, 0.0
-    total_weight = 0.0
-    for i, char in enumerate(hint_str):
-        weight = 1.0 / (i + 1)
-        kx, ky = KEYBOARD_POSITIONS[char]
-        tx += kx * weight
-        ty += ky * weight
-        total_weight += weight
-    return (tx / total_weight, ty / total_weight)
+    nx = max(0.0, min(1.0, rx / width)) if width > 0 else 0.5
+    ny = max(0.0, min(1.0, ry / height)) if height > 0 else 0.5
+    col = min(int(nx * 3), 2)
+    row = min(int(ny * 3), 2)
+    return (row, col)
 
 
 def get_hints(
@@ -143,29 +138,33 @@ def get_hints(
     alphabet: str,
     window_size: tuple[float, float] | None = None,
 ) -> dict[str, Child]:
-    """Get hints with spatial keyboard-based assignment.
+    """Get hints with spatial zone-based keyboard assignment.
 
-    When window_size is provided, hints are assigned so that keyboard key
-    positions spatially correspond to element positions on screen. Top-left
-    screen elements get top-left keyboard keys (q, a, z), center elements
-    get center keys (t, g, b, y, h), etc.
+    The screen is split into a 3x3 grid that mirrors the keyboard layout:
+      Left keys   (q/w/e, a/s/d, z/x/c)  → left third of screen
+      Center keys (r/t/y, f/g/h, v/b/n)  → center third
+      Right keys  (u/i/o/p, j/k/l, m)    → right third
+    Keyboard rows (top/home/bottom) map to screen rows (top/mid/bottom).
+
+    Within each zone, children are sorted top-to-bottom, left-to-right and
+    assigned the zone's keys sequentially.  If a zone has more children
+    than single keys, multi-character hints are generated from that zone's
+    key set.
 
     :param children: The children elements of window that indicate the
         absolute position of those elements.
     :param alphabet: The alphabet used to create hints.
     :param window_size: Optional (width, height) for spatial mapping.
-    :return: The hints. Ex {"ab": Child, "ac": Child}
+    :return: The hints. Ex {"ag": Child, "sh": Child}
     """
     hints: dict[str, Child] = {}
 
     if len(children) == 0:
         return hints
 
-    n_chars = ceil(log(len(children)) / log(len(alphabet)))
-
-    # Fall back to sequential assignment if no window size or if the
-    # alphabet contains characters without known keyboard positions.
-    if window_size is None or not all(c in KEYBOARD_POSITIONS for c in alphabet):
+    # Fall back to sequential assignment when spatial mapping isn't possible.
+    if window_size is None:
+        n_chars = ceil(log(len(children)) / log(len(alphabet)))
         for child, hint in zip(
             children,
             product(alphabet, repeat=n_chars),
@@ -175,39 +174,52 @@ def get_hints(
 
     width, height = window_size
 
-    # Generate candidate hints and their target screen positions.
-    all_hints = ["".join(h) for h in product(alphabet, repeat=n_chars)]
-    hint_targets = {h: _hint_screen_position(h) for h in all_hints}
-
-    # Normalize child positions to [0, 1].
-    child_positions: list[tuple[float, float]] = []
+    # Bucket children into their 3x3 screen zone.
+    zone_buckets: dict[tuple[int, int], list[Child]] = {}
     for child in children:
         rx, ry = child.relative_position
-        nx = max(0.0, min(1.0, rx / width)) if width > 0 else 0.5
-        ny = max(0.0, min(1.0, ry / height)) if height > 0 else 0.5
-        child_positions.append((nx, ny))
+        zone = _get_zone(rx, ry, width, height)
+        zone_buckets.setdefault(zone, []).append(child)
 
-    # Greedy nearest-neighbour matching: pair each child with the
-    # spatially closest available hint based on keyboard position.
-    pairs: list[tuple[float, int, str]] = []
-    for ci, (cx, cy) in enumerate(child_positions):
-        for hint_str, (hx, hy) in hint_targets.items():
-            dist = (cx - hx) ** 2 + (cy - hy) ** 2
-            pairs.append((dist, ci, hint_str))
+    # Sort each bucket top-to-bottom then left-to-right for consistency.
+    for bucket in zone_buckets.values():
+        bucket.sort(key=lambda c: (c.relative_position[1], c.relative_position[0]))
 
-    pairs.sort()
+    # Assign hints per zone using that zone's keyboard keys.
+    # The first character comes from the zone's own keys (spatial meaning),
+    # subsequent characterzs use the full alphabet (maximizes 2-char coverage).
+    for (row, col), zone_children in zone_buckets.items():
+        zone_keys = KEYBOARD_ZONES[row][col]
+        n = len(zone_children)
 
-    assigned_children: set[int] = set()
-    assigned_hints: set[str] = set()
+        if n <= len(zone_keys):
+            # Few enough children — single-char hints from the zone keys.
+            for child, key in zip(zone_children, zone_keys):
+                hints[key] = child
+        else:
+            # Multi-char: first char = zone key, rest = full alphabet.
+            hint_labels = []
+            for first in zone_keys:
+                for rest in product(alphabet, repeat=1):
+                    hint_labels.append(first + "".join(rest))
+                    if len(hint_labels) >= n:
+                        break
+                if len(hint_labels) >= n:
+                    break
 
-    for dist, ci, hint_str in pairs:
-        if ci in assigned_children or hint_str in assigned_hints:
-            continue
-        hints[hint_str] = children[ci]
-        assigned_children.add(ci)
-        assigned_hints.add(hint_str)
-        if len(assigned_children) == len(children):
-            break
+            # If still not enough (very dense zone), extend to 3 chars.
+            if len(hint_labels) < n:
+                hint_labels = []
+                for first in zone_keys:
+                    for rest in product(alphabet, repeat=2):
+                        hint_labels.append(first + "".join(rest))
+                        if len(hint_labels) >= n:
+                            break
+                    if len(hint_labels) >= n:
+                        break
+
+            for child, label in zip(zone_children, hint_labels):
+                hints[label] = child
 
     return hints
 
