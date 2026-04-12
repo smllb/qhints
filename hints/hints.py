@@ -13,6 +13,7 @@ from gi import require_version
 from hints.backends.atspi import AtspiBackend
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.backends.opencv import OpenCV
+from hints.constants import KEYBOARD_POSITIONS
 from hints.huds.interceptor import InterceptorWindow
 from hints.huds.overlay import OverlayWindow
 from hints.mouse import click
@@ -116,12 +117,43 @@ def display_gtk_window(
     Gtk.main()
 
 
-def get_hints(children: list[Child], alphabet: str) -> dict[str, Child]:
-    """Get hints.
+def _hint_screen_position(hint_str: str) -> tuple[float, float]:
+    """Compute the target screen position for a hint string.
 
-    :param children: The children elements of windown that indicate the
+    Maps keyboard key positions to screen coordinates using harmonically-weighted
+    averaging so the first character dominates (defines the broad screen zone)
+    and subsequent characters refine within it.
+
+    :param hint_str: The hint string, e.g. "a" or "ah".
+    :return: Normalized (x, y) target position in [0, 1] range.
+    """
+    tx, ty = 0.0, 0.0
+    total_weight = 0.0
+    for i, char in enumerate(hint_str):
+        weight = 1.0 / (i + 1)
+        kx, ky = KEYBOARD_POSITIONS[char]
+        tx += kx * weight
+        ty += ky * weight
+        total_weight += weight
+    return (tx / total_weight, ty / total_weight)
+
+
+def get_hints(
+    children: list[Child],
+    alphabet: str,
+    window_size: tuple[float, float] | None = None,
+) -> dict[str, Child]:
+    """Get hints with spatial keyboard-based assignment.
+
+    When window_size is provided, hints are assigned so that keyboard key
+    positions spatially correspond to element positions on screen. Top-left
+    screen elements get top-left keyboard keys (q, a, z), center elements
+    get center keys (t, g, b, y, h), etc.
+
+    :param children: The children elements of window that indicate the
         absolute position of those elements.
-    :param alphabet: The alphabet used to create hints
+    :param alphabet: The alphabet used to create hints.
+    :param window_size: Optional (width, height) for spatial mapping.
     :return: The hints. Ex {"ab": Child, "ac": Child}
     """
     hints: dict[str, Child] = {}
@@ -129,11 +161,53 @@ def get_hints(children: list[Child], alphabet: str) -> dict[str, Child]:
     if len(children) == 0:
         return hints
 
-    for child, hint in zip(
-        children,
-        product(alphabet, repeat=ceil(log(len(children)) / log(len(alphabet)))),
-    ):
-        hints["".join(hint)] = child
+    n_chars = ceil(log(len(children)) / log(len(alphabet)))
+
+    # Fall back to sequential assignment if no window size or if the
+    # alphabet contains characters without known keyboard positions.
+    if window_size is None or not all(c in KEYBOARD_POSITIONS for c in alphabet):
+        for child, hint in zip(
+            children,
+            product(alphabet, repeat=n_chars),
+        ):
+            hints["".join(hint)] = child
+        return hints
+
+    width, height = window_size
+
+    # Generate candidate hints and their target screen positions.
+    all_hints = ["".join(h) for h in product(alphabet, repeat=n_chars)]
+    hint_targets = {h: _hint_screen_position(h) for h in all_hints}
+
+    # Normalize child positions to [0, 1].
+    child_positions: list[tuple[float, float]] = []
+    for child in children:
+        rx, ry = child.relative_position
+        nx = max(0.0, min(1.0, rx / width)) if width > 0 else 0.5
+        ny = max(0.0, min(1.0, ry / height)) if height > 0 else 0.5
+        child_positions.append((nx, ny))
+
+    # Greedy nearest-neighbour matching: pair each child with the
+    # spatially closest available hint based on keyboard position.
+    pairs: list[tuple[float, int, str]] = []
+    for ci, (cx, cy) in enumerate(child_positions):
+        for hint_str, (hx, hy) in hint_targets.items():
+            dist = (cx - hx) ** 2 + (cy - hy) ** 2
+            pairs.append((dist, ci, hint_str))
+
+    pairs.sort()
+
+    assigned_children: set[int] = set()
+    assigned_hints: set[str] = set()
+
+    for dist, ci, hint_str in pairs:
+        if ci in assigned_children or hint_str in assigned_hints:
+            continue
+        hints[hint_str] = children[ci]
+        assigned_children.add(ci)
+        assigned_hints.add(hint_str)
+        if len(assigned_children) == len(children):
+            break
 
     return hints
 
@@ -161,6 +235,7 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
         )
         try:
             children = current_backend.get_children()
+            window_extents = current_backend.window_system.focused_window_extents
 
             logger.debug("Gathering hints took %f seconds", time() - start)
             logger.debug("Gathered %d hints", len(children))
@@ -168,9 +243,12 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             hints = get_hints(
                 children,
                 alphabet=config["alphabet"],
+                window_size=(
+                    window_extents[2], window_extents[3]
+                )
+                if window_extents
+                else None,
             )
-
-            window_extents = current_backend.window_system.focused_window_extents
 
         except AccessibleChildrenNotFoundError:
             logger.debug(

@@ -8,6 +8,25 @@ require_version("Gdk", "3.0")
 require_version("Atspi", "2.0")
 from gi.repository import Atspi, Gdk
 
+# QWERTY keyboard key positions normalized to [0, 1] x [0, 1].
+# Used for spatial hint assignment: keyboard topology maps to screen position.
+# Accounts for standard row stagger (home row offset +0.25, bottom row +0.75).
+KEYBOARD_POSITIONS: dict[str, tuple[float, float]] = {
+    # Top row (y=0.0)
+    "q": (0.000, 0.0), "w": (0.111, 0.0), "e": (0.222, 0.0),
+    "r": (0.333, 0.0), "t": (0.444, 0.0), "y": (0.556, 0.0),
+    "u": (0.667, 0.0), "i": (0.778, 0.0), "o": (0.889, 0.0),
+    "p": (1.000, 0.0),
+    # Home row (y=0.5)
+    "a": (0.028, 0.5), "s": (0.139, 0.5), "d": (0.250, 0.5),
+    "f": (0.361, 0.5), "g": (0.472, 0.5), "h": (0.583, 0.5),
+    "j": (0.694, 0.5), "k": (0.806, 0.5), "l": (0.917, 0.5),
+    # Bottom row (y=1.0)
+    "z": (0.083, 1.0), "x": (0.194, 1.0), "c": (0.306, 1.0),
+    "v": (0.417, 1.0), "b": (0.528, 1.0), "n": (0.639, 1.0),
+    "m": (0.750, 1.0),
+}
+
 CONFIG_PATH = path.join(path.expanduser("~"), ".config/hints/config.json")
 MOUSE_GRAB_PAUSE = 0.2
 UNIX_DOMAIN_SOCKET_FILE = "/tmp/hints.socket"
