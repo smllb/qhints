@@ -608,6 +608,14 @@ def main():
         _sys.modules["gi._option"] = _opt
         _sys.modules["optparse"] = _MT("optparse")
 
+        # pkgutil — gi/__init__ uses extend_path() to discover alternate gi
+        # package installations on sys.path.  With a single gi install (the
+        # normal case) this is a no-op that costs ~3 ms.  The stub returns the
+        # existing __path__ unchanged so gi's own path is unaffected.
+        _pk = _MT("pkgutil")
+        _pk.extend_path = lambda path, name: path  # type: ignore[attr-defined]
+        _sys.modules["pkgutil"] = _pk
+
     config = load_config()
 
     from argparse import ArgumentParser

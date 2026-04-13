@@ -1,7 +1,6 @@
 """Accessibility backend to get elements from an application using Atspi."""
 
-import logging
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from gi import require_version
 
@@ -14,7 +13,24 @@ from hints.backends.backend import HintsBackend
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.child import Child
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    import logging
+
+
+class _LazyLogger:
+    """Defer ``import logging`` until first use (~3-5 ms savings)."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        import logging
+
+        real = logging.getLogger(__name__)
+        globals()["logger"] = real
+        return getattr(real, name)
+
+
+logger = _LazyLogger()  # type: ignore[assignment]
 
 
 class AtspiBackend(HintsBackend):
