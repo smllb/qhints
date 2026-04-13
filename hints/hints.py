@@ -585,15 +585,10 @@ def main():
         _sys.modules["asyncio"] = _AsyncioStub("asyncio")
 
         # socket — gi/overrides/GLib.py: `isinstance(ch, socket.socket)` in a
-        # Win32-only branch.  The stub's socket class ensures isinstance returns
-        # False without triggering selectors/ipaddress.
-        class _SocketStub(_MT):
-            class socket:
-                pass
-
-        _sys.modules["socket"] = _SocketStub("socket")
-        _sys.modules["selectors"] = _MT("selectors")
-        _sys.modules["ipaddress"] = _MT("ipaddress")
+        # Win32-only branch.  We intentionally do NOT stub socket here: while
+        # GLib.py imports it at module-level, gi/_ossighelper.py calls
+        # socket.socketpair() at runtime inside Gtk.main(), so the full real
+        # socket module must be available.  The ~1.6ms import cost is accepted.
 
         # gi._option / optparse — GLib option-parsing extension exposed as
         # GLib.option; hints never uses it.  Stubbing gi._option directly avoids
