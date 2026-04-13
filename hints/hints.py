@@ -554,16 +554,23 @@ def get_window_system(window_system_id: str = "") -> Type[WindowSystem]:
 def main():
     """Hints entry point."""
 
-    # gi._gi (C extension) imports asyncio solely for GLib event-loop
-    # integration, which hints never uses.  By pre-populating sys.modules
-    # with a minimal stub we avoid the full asyncio bootstrap (~23 ms).
-    # Only the two symbols gi._gi actually accesses are provided; everything
-    # else remains absent so any accidental asyncio use will still fail loudly.
+    # gi._gi (C extension) imports several heavy stdlib modules solely for
+    # optional GLib integration that hints never uses.  Pre-populating
+    # sys.modules with minimal stubs avoids those bootstrap costs:
+    #
+    #   asyncio  (~23 ms) — GLib/asyncio event-loop bridge
+    #   socket   (~ 2 ms) — GLib.IOChannel Win32 socket path (never hit on Linux)
+    #   selectors, ipaddress — pulled in transitively by socket
+    #   gi._option / optparse (~3 ms) — GLib option-parsing integration
+    #
+    # Each stub provides only the symbols the gi C extension actually accesses
+    # at import time.  Any accidental use of real functionality will fail loudly
+    # because the stubs are intentionally minimal.
     import sys as _sys
     if "asyncio" not in _sys.modules:
-        from types import ModuleType as _ModuleType
+        from types import ModuleType as _MT
 
-        class _AsyncioStub(_ModuleType):
+        class _AsyncioStub(_MT):
             class InvalidStateError(Exception):
                 pass
 
@@ -576,6 +583,30 @@ def main():
                 return None
 
         _sys.modules["asyncio"] = _AsyncioStub("asyncio")
+
+        # socket — gi/overrides/GLib.py: `isinstance(ch, socket.socket)` in a
+        # Win32-only branch.  The stub's socket class ensures isinstance returns
+        # False without triggering selectors/ipaddress.
+        class _SocketStub(_MT):
+            class socket:
+                pass
+
+        _sys.modules["socket"] = _SocketStub("socket")
+        _sys.modules["selectors"] = _MT("selectors")
+        _sys.modules["ipaddress"] = _MT("ipaddress")
+
+        # gi._option / optparse — GLib option-parsing extension exposed as
+        # GLib.option; hints never uses it.  Stubbing gi._option directly avoids
+        # loading optparse (~3 ms).
+        _opt = _MT("gi._option")
+        for _n in (
+            "OptParseError", "OptionError", "OptionValueError",
+            "BadOptionError", "OptionConflictError", "Option",
+            "OptionGroup", "OptionContext", "make_option", "OptionParser",
+        ):
+            setattr(_opt, _n, type(_n, (Exception if "Error" in _n else object,), {}))
+        _sys.modules["gi._option"] = _opt
+        _sys.modules["optparse"] = _MT("optparse")
 
     config = load_config()
 
