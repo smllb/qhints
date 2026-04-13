@@ -554,6 +554,29 @@ def get_window_system(window_system_id: str = "") -> Type[WindowSystem]:
 def main():
     """Hints entry point."""
 
+    # gi._gi (C extension) imports asyncio solely for GLib event-loop
+    # integration, which hints never uses.  By pre-populating sys.modules
+    # with a minimal stub we avoid the full asyncio bootstrap (~23 ms).
+    # Only the two symbols gi._gi actually accesses are provided; everything
+    # else remains absent so any accidental asyncio use will still fail loudly.
+    import sys as _sys
+    if "asyncio" not in _sys.modules:
+        from types import ModuleType as _ModuleType
+
+        class _AsyncioStub(_ModuleType):
+            class InvalidStateError(Exception):
+                pass
+
+            @staticmethod
+            def _get_running_loop():
+                return None
+
+            @staticmethod
+            def get_event_loop():
+                return None
+
+        _sys.modules["asyncio"] = _AsyncioStub("asyncio")
+
     config = load_config()
 
     from argparse import ArgumentParser
