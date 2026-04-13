@@ -4,15 +4,12 @@ import logging
 from argparse import ArgumentParser
 from itertools import product
 from math import ceil, log
-from subprocess import run
 from time import time
 from typing import TYPE_CHECKING, Any, Iterable, Type, get_args
 
 from gi import require_version
 
-from hints.backends.atspi import AtspiBackend
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
-from hints.backends.opencv import OpenCV
 from hints.constants import KEYBOARD_ZONES
 from hints.huds.interceptor import InterceptorWindow
 from hints.huds.overlay import OverlayWindow
@@ -290,13 +287,22 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
     window_extents = None
     hints = {}
 
-    backends_map = {"atspi": AtspiBackend, "opencv": OpenCV}
     backends = config["backends"]["enable"]
 
     for backend in backends:
 
         start = time()
-        current_backend = backends_map[backend](config, window_system)
+        # Lazy-import backends so we only pay the import cost (especially
+        # OpenCV ~130 ms) when that backend is actually needed.
+        if backend == "atspi":
+            from hints.backends.atspi import AtspiBackend
+            current_backend = AtspiBackend(config, window_system)
+        elif backend == "opencv":
+            from hints.backends.opencv import OpenCV
+            current_backend = OpenCV(config, window_system)
+        else:
+            logger.warning("Unknown backend '%s', skipping.", backend)
+            continue
         logger.debug(
             "Attempting to get accessible children using the '%s' backend.",
             backend,
@@ -444,20 +450,26 @@ def get_window_system(window_system_id: str = "") -> Type[WindowSystem]:
             window_system_id = "x11"
         if window_system_type == WindowSystemType.WAYLAND:
 
-            # add new waland wms here, then add a match case below to import the class
+            # add new wayland wms here, then add a match case below to import the class
             supported_wayland_wms = {"sway", "Hyprland", "plasmashell", "gnome-shell"}
 
-            # Check if there is a process running that matches the supported_wayland_wms
-            window_system_id = (
-                run(
-                    "ps -e -o comm | grep -m 1 -o -E "
-                    + " ".join([f"-e '^{wm}$'" for wm in supported_wayland_wms]),
-                    capture_output=True,
-                    shell=True,
-                )
-                .stdout.decode("utf-8")
-                .strip()
-            ).lower()
+            # Detect the running compositor by scanning /proc directly.
+            # This avoids spawning ps + grep subprocesses (~50 ms saving).
+            from os import listdir
+            from os.path import isdir, join
+
+            for pid_dir in listdir("/proc"):
+                if not pid_dir.isdigit():
+                    continue
+                try:
+                    comm_path = join("/proc", pid_dir, "comm")
+                    with open(comm_path) as f:
+                        comm = f.read().strip()
+                    if comm in supported_wayland_wms:
+                        window_system_id = comm.lower()
+                        break
+                except (OSError, PermissionError):
+                    continue
 
     window_system = get_window_system_class(window_system_id)
 
