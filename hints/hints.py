@@ -181,7 +181,63 @@ def get_hints(
         zone = _get_zone(rx, ry, width, height)
         zone_buckets.setdefault(zone, []).append(child)
 
-    # Sort each bucket top-to-bottom then left-to-right for consistency.
+    # Redistribute overflow: when a zone has more children than its 2-char
+    # hint capacity (zone_keys × alphabet_size), spill excess children to
+    # the nearest neighboring zone(s) with spare room.  Children closest
+    # to the neighbor are moved first to preserve spatial coherence.
+    def _zone_cap(r: int, c: int) -> int:
+        return len(KEYBOARD_ZONES[r][c]) * len(alphabet)
+
+    def _zone_center_px(r: int, c: int) -> tuple[float, float]:
+        return ((c + 0.5) / 3 * width, (r + 0.5) / 3 * height)
+
+    def _neighbors(r: int, c: int) -> list[tuple[int, int]]:
+        """Adjacent zones sorted by grid distance (cardinal first)."""
+        nbrs = []
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if 0 <= nr <= 2 and 0 <= nc <= 2:
+                    nbrs.append((nr, nc))
+        nbrs.sort(key=lambda z: (z[0] - r) ** 2 + (z[1] - c) ** 2)
+        return nbrs
+
+    for _ in range(9):  # at most 9 zones; converges quickly
+        moved_any = False
+        for zone in list(zone_buckets):
+            cap = _zone_cap(*zone)
+            bucket = zone_buckets[zone]
+            if len(bucket) <= cap:
+                continue
+            excess = len(bucket) - cap
+            for nbr in _neighbors(*zone):
+                nbr_cap = _zone_cap(*nbr)
+                nbr_bucket = zone_buckets.setdefault(nbr, [])
+                space = nbr_cap - len(nbr_bucket)
+                if space <= 0:
+                    continue
+                # Sort by distance to neighbor center; move the closest.
+                ncx, ncy = _zone_center_px(*nbr)
+                bucket.sort(
+                    key=lambda ch, _cx=ncx, _cy=ncy: (
+                        (ch.relative_position[0] - _cx) ** 2
+                        + (ch.relative_position[1] - _cy) ** 2
+                    )
+                )
+                to_move = min(space, excess)
+                zone_buckets[nbr] = nbr_bucket + bucket[:to_move]
+                bucket = bucket[to_move:]
+                zone_buckets[zone] = bucket
+                excess -= to_move
+                moved_any = True
+                if excess <= 0:
+                    break
+        if not moved_any:
+            break
+
+    # Sort each bucket top-to-bottom, left-to-right after redistribution.
     for bucket in zone_buckets.values():
         bucket.sort(key=lambda c: (c.relative_position[1], c.relative_position[0]))
 
