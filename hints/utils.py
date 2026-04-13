@@ -1,7 +1,7 @@
 from json import load
 from typing import Any
 
-from hints.constants import CONFIG_PATH, DEFAULT_CONFIG
+from hints.constants import CONFIG_PATH, get_default_config
 
 HintsConfig = dict[str, Any]
 
@@ -36,4 +36,4 @@ def load_config() -> HintsConfig:
     except FileNotFoundError:
         pass
 
-    return merge_configs(config, DEFAULT_CONFIG)
+    return merge_configs(config, get_default_config())

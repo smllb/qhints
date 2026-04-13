@@ -7,14 +7,8 @@ from math import ceil, log
 from time import time
 from typing import TYPE_CHECKING, Any, Iterable, Type, get_args
 
-from gi import require_version
-
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.constants import KEYBOARD_ZONES
-from hints.huds.interceptor import InterceptorWindow
-from hints.huds.overlay import OverlayWindow
-from hints.mouse import click
-from hints.mouse_enums import MouseButton, MouseButtonState
 from hints.utils import HintsConfig, load_config
 from hints.window_systems.exceptions import WindowSystemNotSupported
 from hints.window_systems.window_system import WindowSystem
@@ -32,14 +26,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-require_version("Gtk", "3.0")
-require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gtk
-
-
 def display_gtk_window(
     window_system: WindowSystem,
-    gtk_window: Gtk.Window,
+    gtk_window,
     x: int,
     y: int,
     width: int,
@@ -64,6 +53,11 @@ def display_gtk_window(
     :param overlay_x_offset: X offset position for the window.
     :param overlay_y_offset: Y offset position for the window.
     """
+    from gi import require_version
+
+    require_version("Gtk", "3.0")
+    require_version("Gdk", "3.0")
+    from gi.repository import Gdk, Gtk
 
     window_x_pos = x + overlay_x_offset
     window_y_pos = y + overlay_y_offset
@@ -277,6 +271,23 @@ def get_hints(
     return hints
 
 
+def _preload_gtk_modules():
+    """Pre-import GTK and overlay modules in a background thread.
+
+    Called while get_children() runs so the ~30 ms GTK bootstrap overlaps
+    with the ~31 ms atspi tree walk instead of running sequentially.
+    """
+    try:
+        from gi import require_version
+
+        require_version("Gtk", "3.0")
+        require_version("Gdk", "3.0")
+        from gi.repository import Gdk, Gtk  # noqa: F811, F401
+        from hints.huds.overlay import OverlayWindow  # noqa: F401
+    except Exception:
+        pass  # failures are benign; the main thread will import again
+
+
 def hint_mode(config: HintsConfig, window_system: WindowSystem):
     """Hint mode to interact with hints on screen.
 
@@ -284,6 +295,8 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
     :param window_system: Window System for the session.
     :param mouse: Mouse device for mouse actions.
     """
+    import threading
+
     window_extents = None
     hints = {}
 
@@ -307,6 +320,11 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             "Attempting to get accessible children using the '%s' backend.",
             backend,
         )
+
+        # Pre-import GTK + overlay in background while the tree walk runs.
+        gtk_thread = threading.Thread(target=_preload_gtk_modules, daemon=True)
+        gtk_thread.start()
+
         try:
             children = current_backend.get_children()
             window_extents = current_backend.window_system.focused_window_extents
@@ -334,6 +352,10 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             mouse_action: dict[str, Any] = {}
             x, y, width, height = window_extents
 
+            # Ensure GTK preload finished before touching the overlay.
+            gtk_thread.join()
+            from hints.huds.overlay import OverlayWindow
+
             display_gtk_window(
                 window_system,
                 OverlayWindow,
@@ -355,6 +377,10 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             )
 
             if mouse_action:
+
+                from hints.huds.interceptor import InterceptorWindow
+                from hints.mouse import click
+                from hints.mouse_enums import MouseButton, MouseButtonState
 
                 mouse_x_offset = 0
                 mouse_y_offset = 0
@@ -523,6 +549,8 @@ def main():
         case "hint":
             hint_mode(config, window_system)
         case "scroll":
+            from hints.huds.interceptor import InterceptorWindow
+
             display_gtk_window(
                 window_system,
                 InterceptorWindow,
