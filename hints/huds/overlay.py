@@ -66,6 +66,13 @@ class OverlayWindow(Gtk.Window):
         self.hint_font_b = hints_config["hint_font_b"]
         self.hint_font_a = hints_config["hint_font_a"]
 
+        self.hint_first_font_r = hints_config.get("hint_first_font_r", 0.85)
+        self.hint_first_font_g = hints_config.get("hint_first_font_g", 0.1)
+        self.hint_first_font_b = hints_config.get("hint_first_font_b", 0.1)
+        self.hint_first_font_a = hints_config.get("hint_first_font_a", 1)
+        self.hint_first_font_size_boost = hints_config.get("hint_first_font_size_boost", 3)
+        self.hint_overlap_threshold = hints_config.get("hint_overlap_threshold", 50)
+
         self.hint_pressed_font_r = hints_config["hint_pressed_font_r"]
         self.hint_pressed_font_g = hints_config["hint_pressed_font_g"]
         self.hint_pressed_font_b = hints_config["hint_pressed_font_b"]
@@ -76,6 +83,20 @@ class OverlayWindow(Gtk.Window):
         self.hint_background_g = hints_config["hint_background_g"]
         self.hint_background_b = hints_config["hint_background_b"]
         self.hint_background_a = hints_config["hint_background_a"]
+
+        self.hint_border_r = hints_config.get("hint_border_r", 0.78)
+        self.hint_border_g = hints_config.get("hint_border_g", 0.72)
+        self.hint_border_b = hints_config.get("hint_border_b", 0.36)
+        self.hint_border_a = hints_config.get("hint_border_a", 1.0)
+        self.hint_border_width = hints_config.get("hint_border_width", 1.0)
+        self.hint_corner_radius = hints_config.get("hint_corner_radius", 3.0)
+        self.hint_shadow = hints_config.get("hint_shadow", True)
+        self.hint_shadow_r = hints_config.get("hint_shadow_r", 0.0)
+        self.hint_shadow_g = hints_config.get("hint_shadow_g", 0.0)
+        self.hint_shadow_b = hints_config.get("hint_shadow_b", 0.0)
+        self.hint_shadow_a = hints_config.get("hint_shadow_a", 0.3)
+        self.hint_shadow_offset_x = hints_config.get("hint_shadow_offset_x", 1)
+        self.hint_shadow_offset_y = hints_config.get("hint_shadow_offset_y", 1)
 
         # key settings
         self.exit_key = config["exit_key"]
@@ -126,7 +147,48 @@ class OverlayWindow(Gtk.Window):
         cr.select_font_face(self.hint_font_face, FONT_SLANT_NORMAL, FONT_WEIGHT_BOLD)
         cr.set_font_size(self.hint_font_size)
 
+        # Pre-compute hint bounding boxes for overlap detection.
+        hint_rects: dict[str, tuple[float, float, float, float]] = {}
         for hint_value, child in self.hints.items():
+            x_loc, y_loc = child.relative_position
+            if x_loc >= 0 and y_loc >= 0:
+                utf8 = hint_value.upper() if self.hint_upercase else hint_value
+                x_bearing, _, width, _, _, _ = cr.text_extents(utf8)
+                hint_width = width + self.hint_width_padding
+                hx = x_loc + child.width / 2 - hint_width / 2
+                hy = y_loc + child.height / 2 - hint_height / 2
+                hint_rects[hint_value] = (hx, hy, hint_width, hint_height)
+
+        def overlap_fraction(a: tuple[float, float, float, float],
+                             b: tuple[float, float, float, float]) -> float:
+            """Return overlap as a fraction of the smaller rect's area."""
+            ax, ay, aw, ah = a
+            bx, by, bw, bh = b
+            ox = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+            oy = max(0, min(ay + ah, by + bh) - max(ay, by))
+            overlap_area = ox * oy
+            smaller_area = min(aw * ah, bw * bh)
+            return overlap_area / smaller_area if smaller_area > 0 else 0
+
+        # Keep only hints that don't heavily overlap with already-accepted ones.
+        # hint_overlap_threshold: 0 = show all (no filtering), 100 = very aggressive.
+        overlap_limit = (100 - self.hint_overlap_threshold) / 100.0
+        accepted: list[str] = []
+        for hv in hint_rects:
+            if self.hint_overlap_threshold == 0:
+                accepted.append(hv)
+                continue
+            dominated = False
+            for av in accepted:
+                if overlap_fraction(hint_rects[hv], hint_rects[av]) > overlap_limit:
+                    dominated = True
+                    break
+            if not dominated:
+                accepted.append(hv)
+
+        visible_hints = {hv: self.hints[hv] for hv in accepted}
+
+        for hint_value, child in visible_hints.items():
             x_loc, y_loc = child.relative_position
             if x_loc >= 0 and y_loc >= 0:
                 cr.save()
@@ -157,38 +219,97 @@ class OverlayWindow(Gtk.Window):
                     hint_y_offset + hint_height / 2,
                 )
 
-                cr.rectangle(0, 0, hint_width, hint_height)
+                r = self.hint_corner_radius
+
+                # draw shadow
+                if self.hint_shadow:
+                    sx = self.hint_shadow_offset_x
+                    sy = self.hint_shadow_offset_y
+                    cr.new_path()
+                    cr.arc(sx + r, sy + r, r, 3.14159, 3.14159 * 1.5)
+                    cr.arc(sx + hint_width - r, sy + r, r, 3.14159 * 1.5, 0)
+                    cr.arc(sx + hint_width - r, sy + hint_height - r, r, 0, 3.14159 * 0.5)
+                    cr.arc(sx + r, sy + hint_height - r, r, 3.14159 * 0.5, 3.14159)
+                    cr.close_path()
+                    cr.set_source_rgba(
+                        self.hint_shadow_r,
+                        self.hint_shadow_g,
+                        self.hint_shadow_b,
+                        self.hint_shadow_a,
+                    )
+                    cr.fill()
+
+                # draw rounded background
+                cr.new_path()
+                cr.arc(r, r, r, 3.14159, 3.14159 * 1.5)
+                cr.arc(hint_width - r, r, r, 3.14159 * 1.5, 0)
+                cr.arc(hint_width - r, hint_height - r, r, 0, 3.14159 * 0.5)
+                cr.arc(r, hint_height - r, r, 3.14159 * 0.5, 3.14159)
+                cr.close_path()
                 cr.set_source_rgba(
                     self.hint_background_r,
                     self.hint_background_g,
                     self.hint_background_b,
                     self.hint_background_a,
                 )
-                cr.fill()
+                cr.fill_preserve()
+
+                # draw border
+                cr.set_source_rgba(
+                    self.hint_border_r,
+                    self.hint_border_g,
+                    self.hint_border_b,
+                    self.hint_border_a,
+                )
+                cr.set_line_width(self.hint_border_width)
+                cr.stroke()
 
                 hint_text_position = (
                     (hint_width / 2) - (width / 2 + x_bearing),
                     (hint_height / 2) - (height / 2 + y_bearing),
                 )
 
-                # draw hint
-                cr.move_to(*hint_text_position)
-                cr.set_source_rgba(
-                    self.hint_font_r,
-                    self.hint_font_g,
-                    self.hint_font_b,
-                    self.hint_font_a,
-                )
-                cr.show_text(utf8)
+                # Draw hint text character by character.
+                # First letter: red + slightly larger. Rest: normal color.
+                text_x, text_y = hint_text_position
+                pressed_len = len(hint_state)
 
-                cr.move_to(*hint_text_position)
-                cr.set_source_rgba(
-                    self.hint_pressed_font_r,
-                    self.hint_pressed_font_g,
-                    self.hint_pressed_font_b,
-                    self.hint_pressed_font_a,
-                )
-                cr.show_text(hint_state)
+                for ci, ch in enumerate(utf8):
+                    if ci < pressed_len:
+                        # Already-typed character — pressed color.
+                        cr.set_font_size(self.hint_font_size)
+                        cr.set_source_rgba(
+                            self.hint_pressed_font_r,
+                            self.hint_pressed_font_g,
+                            self.hint_pressed_font_b,
+                            self.hint_pressed_font_a,
+                        )
+                    elif ci == 0:
+                        # First letter — red + larger.
+                        cr.set_font_size(
+                            self.hint_font_size + self.hint_first_font_size_boost
+                        )
+                        cr.set_source_rgba(
+                            self.hint_first_font_r,
+                            self.hint_first_font_g,
+                            self.hint_first_font_b,
+                            self.hint_first_font_a,
+                        )
+                    else:
+                        # Remaining letters — normal color.
+                        cr.set_font_size(self.hint_font_size)
+                        cr.set_source_rgba(
+                            self.hint_font_r,
+                            self.hint_font_g,
+                            self.hint_font_b,
+                            self.hint_font_a,
+                        )
+                    cr.move_to(text_x, text_y)
+                    cr.show_text(ch)
+                    text_x += cr.text_extents(ch).x_advance
+
+                # Reset font size for next hint.
+                cr.set_font_size(self.hint_font_size)
 
                 cr.close_path()
                 cr.restore()
