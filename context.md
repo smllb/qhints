@@ -71,15 +71,30 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 - Atspi remains fully functional: desktop tree walk, `get_child_at_index`, `get_role`, state sets all verified working.
 - Fixed overhead: **~38ms → ~23ms** (-15ms, -39%)
 
-## Current Timing Breakdown (~23ms fixed overhead + variable tree walk)
+### 10. `8fe3733` perf: stub socket/selectors/ipaddress/gi._option to save ~3ms
+**Files:** `hints/hints.py`
+
+- `socket` (~2ms): `gi/overrides/GLib.py` imports it for a Win32 `isinstance(channel, socket.socket)` check — dead code on Linux. Stub provides a dummy `socket` class so `isinstance` returns `False` without triggering `selectors`/`ipaddress`.
+- `selectors`, `ipaddress`: pulled transitively by `socket`; stubbed as empty modules.
+- `gi._option` / `optparse` (~3ms): `GLib.py` imports `gi._option` to expose GLib option parsing. Hints never uses it. Stubbing `gi._option` directly avoids loading `optparse`. All public names (`OptParseError`, `OptionGroup`, etc.) provided as dummy classes.
+- Fixed overhead: **~23ms → ~20ms**
+
+### 11. `85503d1` perf: stub pkgutil + lazy logger in atspi.py (~5ms more)
+**Files:** `hints/hints.py`, `hints/backends/atspi.py`
+
+- `pkgutil` stub (~3ms): `gi/__init__.py` calls `pkgutil.extend_path()` to find alternate gi installations. With a single install this is a no-op that costs ~3ms. Stub returns `__path__` unchanged.
+- Lazy logger in `atspi.py` (~3ms): `atspi.py` had `import logging` at module level (called during the fixed-overhead import of `AtspiBackend`). Replaced with `_LazyLogger` proxy identical to `hints.py`. `import logging` now deferred until first `logger.*` call inside `get_children()` (the variable phase).
+- Fixed overhead: **~20ms → ~16ms**
+
+## Current Timing Breakdown (~16ms fixed overhead + variable tree walk)
 
 | Phase | Time | Notes |
 |---|---|---|
-| asyncio stub install | ~0 ms | `ModuleType` subclass, no I/O |
+| gi stubs install | ~0 ms | ModuleType subclasses/lambdas in-process |
 | config + utils import | ~3.5 ms | No GI at all |
 | hints.py / get_ws import | ~0.7 ms | Lazy logger, deferred stdlib |
 | X11 init | ~2.2 ms | Direct `LoadLibrary('libX11.so.6')`, no `ctypes.util` |
-| Atspi backend import | ~17 ms | gi bootstrap sans asyncio + Atspi typelib |
+| Atspi backend import | ~9 ms | gi._gi C-ext (~3ms) + Atspi typelib (~6ms); asyncio/socket/pkgutil/optparse all stubbed |
 | Atspi backend init | ~0 ms | Fast |
 | `get_children()` | variable | atspi tree walk (GTK preloading in parallel) |
 | GTK thread join | ~0 ms | Already finished during tree walk |
@@ -88,11 +103,12 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 
 ## Remaining Optimization Opportunities
 
-1. **Atspi gi bootstrap (~17ms remaining)**: `import gi` + Atspi typelib now costs ~17ms after asyncio is stubbed. Root cause is `gi._gi` C extension initialization + GObject type system bootstrap. Further savings may be possible by stubbing other heavy transitive imports (`ssl`, `inspect`, `subprocess`) that gi pulls in — needs investigation.
-2. **Cache window system type**: The WM doesn't change between invocations. A one-line file in `/tmp/hints_wm` could skip detection (~0.7ms) entirely on subsequent runs.
-3. **Pre-warm with a daemon**: A persistent background process that keeps GTK/Atspi loaded and listens for activation signals would eliminate all import costs.
-4. **get_children()**: The atspi tree walk itself. Time varies with window complexity. Hard to optimize without changing the traversal algorithm or caching the tree.
-5. **Further asyncio-style stubs**: Check what else gi pulls in (ssl ~8ms, inspect ~5ms) and whether those can also be stubbed safely.
+1. **gi._gi C extension (~3ms)**: Core GObject type system init inside the compiled `.so`. Hard to reduce without patching the binary or pre-loading the shared library via `LD_PRELOAD`.
+2. **Atspi typelib loading (~6ms)**: Loading the Atspi introspection typelib + GLib typelib. Possibly reducible by pre-generating a cached Python binding or using ctypes for just the handful of Atspi functions needed.
+3. **config + utils (~3.5ms)**: JSON parse + deep-merge with default config. Could cache a compiled config object in `/tmp` (pickle or msgpack) across invocations.
+4. **X11 init (~2.2ms)**: `XOpenDisplay` + window property lookups. Minimal further savings without changing the approach.
+5. **Pre-warm daemon**: A persistent background process keeping GTK/Atspi loaded would eliminate all import costs — optimal but adds architectural complexity.
+6. **get_children() tree walk**: The variable phase. Could potentially cache the tree across invocations using a UNIX socket to a long-lived Atspi listener process.
 
 ## Config
 User config at `~/.config/hints/config.json`, deep-merged with `DEFAULT_CONFIG` in `hints/constants.py`.
