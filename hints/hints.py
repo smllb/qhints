@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import logging
-from argparse import ArgumentParser
 from itertools import product
 from math import ceil, log
 from time import time
-from typing import TYPE_CHECKING, Any, Iterable, Type, get_args
+from typing import TYPE_CHECKING
 
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.constants import KEYBOARD_ZONES
@@ -19,11 +17,27 @@ from hints.window_systems.window_system_type import (
 )
 
 if TYPE_CHECKING:
+    from typing import Any, Iterable, Type
+
     from hints.child import Child
     from hints.window_systems.window_system import WindowSystem
 
 
-logger = logging.getLogger(__name__)
+class _LazyLogger:
+    """Proxy that defers ``import logging`` (~5 ms) until first use."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        import logging
+
+        real = logging.getLogger(__name__)
+        # Replace the module-level name so subsequent calls are direct.
+        globals()["logger"] = real
+        return getattr(real, name)
+
+
+logger = _LazyLogger()  # type: ignore[assignment]
 
 
 def display_gtk_window(
@@ -274,8 +288,9 @@ def get_hints(
 def _preload_gtk_modules():
     """Pre-import GTK and overlay modules in a background thread.
 
-    Called while get_children() runs so the ~30 ms GTK bootstrap overlaps
-    with the ~31 ms atspi tree walk instead of running sequentially.
+    Started from hint_mode() right after the atspi backend import (so
+    ``gi`` is already cached).  The Gdk + Gtk + overlay imports (~30 ms)
+    overlap with the atspi tree walk (get_children), so they are free.
     """
     try:
         from gi import require_version
@@ -288,6 +303,35 @@ def _preload_gtk_modules():
         pass  # failures are benign; the main thread will import again
 
 
+# Background-thread bookkeeping shared between main() and hint_mode().
+_gtk_preload_thread: object | None = None
+
+
+def _start_preloads():
+    """Kick off GTK preload in a daemon thread.
+
+    Called from hint_mode() after the atspi backend is imported (so gi
+    is already cached).  The thread pre-imports Gdk + Gtk + overlay
+    while the main thread does the atspi tree walk.
+    """
+    import threading
+
+    global _gtk_preload_thread
+    _gtk_preload_thread = threading.Thread(
+        target=_preload_gtk_modules, daemon=True,
+    )
+    _gtk_preload_thread.start()
+
+
+def _wait_gtk_preload():
+    """Block until the GTK preload thread has finished (if it was started)."""
+    global _gtk_preload_thread
+    thread = _gtk_preload_thread
+    if thread is not None:
+        thread.join()  # type: ignore[union-attr]
+        _gtk_preload_thread = None
+
+
 def hint_mode(config: HintsConfig, window_system: WindowSystem):
     """Hint mode to interact with hints on screen.
 
@@ -295,7 +339,6 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
     :param window_system: Window System for the session.
     :param mouse: Mouse device for mouse actions.
     """
-    import threading
 
     window_extents = None
     hints = {}
@@ -321,9 +364,10 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             backend,
         )
 
-        # Pre-import GTK + overlay in background while the tree walk runs.
-        gtk_thread = threading.Thread(target=_preload_gtk_modules, daemon=True)
-        gtk_thread.start()
+        # Pre-import GTK + overlay in a background thread while the tree
+        # walk runs.  gi is already cached from the atspi import above,
+        # so the thread only needs to load Gdk + Gtk typelibs (~30 ms).
+        _start_preloads()
 
         try:
             children = current_backend.get_children()
@@ -353,7 +397,7 @@ def hint_mode(config: HintsConfig, window_system: WindowSystem):
             x, y, width, height = window_extents
 
             # Ensure GTK preload finished before touching the overlay.
-            gtk_thread.join()
+            _wait_gtk_preload()
             from hints.huds.overlay import OverlayWindow
 
             display_gtk_window(
@@ -500,6 +544,8 @@ def get_window_system(window_system_id: str = "") -> Type[WindowSystem]:
     window_system = get_window_system_class(window_system_id)
 
     if not window_system:
+        from typing import get_args
+
         raise WindowSystemNotSupported(get_args(SupportedWindowSystems))
 
     return window_system
@@ -509,6 +555,8 @@ def main():
     """Hints entry point."""
 
     config = load_config()
+
+    from argparse import ArgumentParser
 
     parser = ArgumentParser(
         prog="Hints",
@@ -535,6 +583,8 @@ def main():
     )
 
     args = parser.parse_args()
+
+    import logging
 
     custom_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 

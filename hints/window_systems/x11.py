@@ -5,7 +5,6 @@ import (~59 ms) while providing the same window information.
 """
 
 import ctypes
-import ctypes.util
 from ctypes import POINTER, Structure, byref, c_int, c_uint, c_ulong, c_void_p
 
 from hints.window_systems.window_system import WindowSystem
@@ -18,10 +17,22 @@ _XA_WINDOW = 33
 
 def _load_xlib():
     """Load and configure the Xlib shared library."""
-    path = ctypes.util.find_library("X11")
-    if not path:
-        raise OSError("Could not find libX11")
-    xlib = ctypes.cdll.LoadLibrary(path)
+    # Try common sonames directly to avoid the ~9 ms cost of importing
+    # ctypes.util and spawning a subprocess in find_library().
+    xlib = None
+    for soname in ("libX11.so.6", "libX11.so"):
+        try:
+            xlib = ctypes.cdll.LoadLibrary(soname)
+            break
+        except OSError:
+            continue
+    if xlib is None:
+        # Fallback: pay the cost only on unusual systems.
+        from ctypes.util import find_library
+        path = find_library("X11")
+        if not path:
+            raise OSError("Could not find libX11")
+        xlib = ctypes.cdll.LoadLibrary(path)
     xlib.XOpenDisplay.restype = c_void_p
     xlib.XInternAtom.restype = c_ulong
     xlib.XDefaultRootWindow.restype = c_ulong
