@@ -86,7 +86,16 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 - Lazy logger in `atspi.py` (~3ms): `atspi.py` had `import logging` at module level (called during the fixed-overhead import of `AtspiBackend`). Replaced with `_LazyLogger` proxy identical to `hints.py`. `import logging` now deferred until first `logger.*` call inside `get_children()` (the variable phase).
 - Fixed overhead: **~20ms → ~16ms**
 
-## Current Timing Breakdown (~16ms fixed overhead + variable tree walk)
+### 12. `92dabf1` fix: remove socket/selectors/ipaddress stubs that broke Gtk.main() + subprocess
+**Files:** `hints/hints.py`
+
+- The socket stub from commit 10 had a fatal runtime flaw: `gi/_ossighelper.py` calls `socket.socketpair()` at runtime *inside* `Gtk.main()` (not at import time), so the empty stub caused `AttributeError` when the overlay tried to display. Overlay showed nothing.
+- `selectors` stub broke `subprocess.py` which does `selectors.SelectSelector` at module import time — `AttributeError` on any code path that used subprocess (including the opencv backend).
+- `ipaddress` was an unnecessary dependent stub, also removed.
+- **All three stubs removed.** Socket's ~1.6ms import cost is accepted.
+- Hints overlay functional again. Fixed overhead: **~16ms → ~18ms** (net regression of ~2ms for correctness).
+
+## Current Timing Breakdown (~18ms fixed overhead + variable tree walk)
 
 | Phase | Time | Notes |
 |---|---|---|
@@ -94,7 +103,7 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 | config + utils import | ~3.5 ms | No GI at all |
 | hints.py / get_ws import | ~0.7 ms | Lazy logger, deferred stdlib |
 | X11 init | ~2.2 ms | Direct `LoadLibrary('libX11.so.6')`, no `ctypes.util` |
-| Atspi backend import | ~9 ms | gi._gi C-ext (~3ms) + Atspi typelib (~6ms); asyncio/socket/pkgutil/optparse all stubbed |
+| Atspi backend import | ~10.5 ms | gi._gi C-ext (~3ms) + Atspi typelib (~6ms) + socket (~1.6ms); asyncio/pkgutil/optparse all stubbed |
 | Atspi backend init | ~0 ms | Fast |
 | `get_children()` | variable | atspi tree walk (GTK preloading in parallel) |
 | GTK thread join | ~0 ms | Already finished during tree walk |
@@ -105,10 +114,11 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 
 1. **gi._gi C extension (~3ms)**: Core GObject type system init inside the compiled `.so`. Hard to reduce without patching the binary or pre-loading the shared library via `LD_PRELOAD`.
 2. **Atspi typelib loading (~6ms)**: Loading the Atspi introspection typelib + GLib typelib. Possibly reducible by pre-generating a cached Python binding or using ctypes for just the handful of Atspi functions needed.
-3. **config + utils (~3.5ms)**: JSON parse + deep-merge with default config. Could cache a compiled config object in `/tmp` (pickle or msgpack) across invocations.
-4. **X11 init (~2.2ms)**: `XOpenDisplay` + window property lookups. Minimal further savings without changing the approach.
-5. **Pre-warm daemon**: A persistent background process keeping GTK/Atspi loaded would eliminate all import costs — optimal but adds architectural complexity.
-6. **get_children() tree walk**: The variable phase. Could potentially cache the tree across invocations using a UNIX socket to a long-lived Atspi listener process.
+3. **socket (~1.6ms)**: `gi/overrides/GLib.py` imports socket at module level for a Win32-only `isinstance` check. Cannot stub it — `gi/_ossighelper.py` calls `socket.socketpair()` at runtime inside `Gtk.main()`. One option: monkey-patch `GLib.py` to not import socket, then provide only the `socketpair` symbol via a custom stub that delegates to the real `socket` loaded lazily.
+4. **config + utils (~3.5ms)**: JSON parse + deep-merge with default config. Could cache a compiled config object in `/tmp` (pickle or msgpack) across invocations.
+5. **X11 init (~2.2ms)**: `XOpenDisplay` + window property lookups. Minimal further savings without changing the approach.
+6. **Pre-warm daemon**: A persistent background process keeping GTK/Atspi loaded would eliminate all import costs — optimal but adds architectural complexity.
+7. **get_children() tree walk**: The variable phase. Could potentially cache the tree across invocations using a UNIX socket to a long-lived Atspi listener process.
 
 ## Config
 User config at `~/.config/hints/config.json`, deep-merged with `DEFAULT_CONFIG` in `hints/constants.py`.
