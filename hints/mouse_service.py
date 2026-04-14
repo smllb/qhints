@@ -60,7 +60,6 @@ class Mouse:
 
         self.absolute_mouse = UInput(
             {
-                ecodes.EV_KEY: keys,
                 ecodes.EV_ABS: [
                     (
                         ecodes.ABS_X,
