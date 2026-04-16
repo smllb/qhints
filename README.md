@@ -1,4 +1,6 @@
 # qhints (quantum hints)
+
+![...](https://imgur.com/dP3T5pG.png)
 Disclaimer:
 
 All changes were done through Github Copilot (Claude Opus 4.6) and honestly i don't advocate for a merge with the source, but it might serve as a reference in future implementations. I had some ideas the other day and gave it a run to see what would happen. The current fork solves some issues i personally had with hints and they are listed below.
