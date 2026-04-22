@@ -317,7 +317,8 @@ class AtspiBackend(HintsBackend):
                 # state, so the pid from the window manger allows us to filter
                 # out such applications.
                 if (
-                    current_window.get_state_set().contains(Atspi.StateType.ACTIVE)
+                    current_window
+                    and current_window.get_state_set().contains(Atspi.StateType.ACTIVE)
                     and current_window.get_process_id()
                     == self.window_system.focused_window_pid
                 ):
