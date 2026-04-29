@@ -8,7 +8,7 @@ Communication.
 
 from __future__ import annotations
 
-from pickle import dumps, loads
+import json
 from socket import AF_UNIX, SOCK_STREAM, socket
 from typing import TYPE_CHECKING, Any
 
@@ -40,15 +40,15 @@ def send_message(method: str, *args, **kwargs) -> Any:
     with socket(AF_UNIX, SOCK_STREAM) as client:
         client.connect(UNIX_DOMAIN_SOCKET_FILE)
         client.sendall(
-            dumps(
+            json.dumps(
                 {
                     "method": method,
                     "args": args,
                     "kwargs": kwargs,
                 }
-            )
+            ).encode()
         )
-        return loads(client.recv(SOCKET_MESSAGE_SIZE))
+        return json.loads(client.recv(SOCKET_MESSAGE_SIZE).decode())
 
 
 def scroll(x: int, y: int, *_args, **_kwargs):

@@ -10,6 +10,7 @@ process when creating virutal devices.
 from __future__ import annotations
 
 import socket
+import json
 from os import path, remove
 from pickle import dumps, loads
 from signal import SIGINT, signal
@@ -265,19 +266,19 @@ class MouseService:
         """
         try:
             connection, _ = self.socket.accept()
-            payload = loads(connection.recv(SOCKET_MESSAGE_SIZE))
+            payload = json.loads(connection.recv(SOCKET_MESSAGE_SIZE).decode())
             method = payload.get("method", "")
             args = payload.get("args", ())
             kwargs = payload.get("kwargs", {})
             connection.send(
-                dumps(
+                json.dumps(
                     {
                         "click": self.mouse.click,
                         "move": self.mouse.move,
-                        "scoll": self.mouse.scroll,
+                        "scroll": self.mouse.scroll,
                         "do_mouse_action": self.mouse.do_mouse_action,
                     }[method](*args, **kwargs)
-                )
+                ).encode()
             )
         except BlockingIOError:
             pass

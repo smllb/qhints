@@ -93,17 +93,20 @@ fn hint_mode(config: &config::Config, total_start: Instant) {
             .expect("Failed to create tokio runtime");
 
         rt.block_on(async {
-            let backend = match backend::atspi::AtspiBackend::new(win_info.clone(), rule.clone()).await {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("Failed to create AT-SPI backend: {}", e);
-                    return Vec::new();
+            match tokio::time::timeout(std::time::Duration::from_millis(150), async {
+                let backend = backend::atspi::AtspiBackend::new(win_info.clone(), rule.clone()).await?;
+                backend.get_children().await
+            }).await {
+                Ok(Ok(children)) => children,
+                Ok(Err(e)) => {
+                    log::debug!("AT-SPI error: {}", e);
+                    Vec::new()
                 }
-            };
-            backend.get_children().await.unwrap_or_else(|e| {
-                log::debug!("AT-SPI: {}", e);
-                Vec::new()
-            })
+                Err(_) => {
+                    log::debug!("AT-SPI timed out after 150ms");
+                    Vec::new()
+                }
+            }
         })
     };
     log::debug!("AT-SPI tree walk: {:?} ({} children)", t.elapsed(), children.len());

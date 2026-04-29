@@ -47,10 +47,14 @@ pub fn get_children(
     let edges = imageproc::edges::canny(&luma, rule.canny_min_val as f32, rule.canny_max_val as f32);
 
     // 4. Dilate
-    // OpenCV uses a kernel of size NxN. A 3x3 square kernel is equivalent to LInf norm distance 1.
-    // So the radius (k) for imageproc is kernel_size / 2.
     let radius = (rule.kernel_size / 2) as u8;
     let dilated = imageproc::morphology::dilate(&edges, imageproc::distance_transform::Norm::LInf, radius);
+
+    // debug dump
+    let _ = std::fs::create_dir_all("/tmp/qhints_debug");
+    let _ = luma.save("/tmp/qhints_debug/01_luma.png");
+    let _ = edges.save("/tmp/qhints_debug/02_edges.png");
+    let _ = dilated.save("/tmp/qhints_debug/03_dilated.png");
 
     // 5. Find contours and bounding boxes
     let contours = imageproc::contours::find_contours(&dilated);
