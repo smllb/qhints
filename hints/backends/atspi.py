@@ -1,6 +1,6 @@
 """Accessibility backend to get elements from an application using Atspi."""
 
-from typing import TYPE_CHECKING, Literal
+from __future__ import annotations
 
 from gi import require_version
 
@@ -13,8 +13,10 @@ from hints.backends.backend import HintsBackend
 from hints.backends.exceptions import AccessibleChildrenNotFoundError
 from hints.child import Child
 
+TYPE_CHECKING = False
 if TYPE_CHECKING:
     import logging
+    from typing import Literal
 
 
 class _LazyLogger:
@@ -48,6 +50,7 @@ class AtspiBackend(HintsBackend):
         self.toolkit = ""
         self.toolkit_version = ""
         self.scale_factor = 1
+        self._match_rule = None  # built lazily after config is loaded
 
     def get_relative_and_absolute_extents(
         self, root: Atspi.Accessible
@@ -192,9 +195,15 @@ class AtspiBackend(HintsBackend):
             return
 
         try:
+            # Cache role and state_set to avoid duplicate D-Bus roundtrips
+            # (validate_match_conditions calls get_role/get_state_set, and
+            #  the debug logging below would call them again).
+            role = root.get_role()
+            state_set = root.get_state_set()
+
             if (
-                self.validate_match_conditions(root, "state")
-                and self.validate_match_conditions(root, "role")
+                self._validate_state_match(state_set)
+                and self._validate_role_match(role)
                 and self.window_system.focused_window_extents
             ):
                 logger.debug(
@@ -202,8 +211,8 @@ class AtspiBackend(HintsBackend):
                     root.name,
                     root.get_id(),
                 )
-                logger.debug("role: %s", root.get_role())
-                logger.debug("states: %s", root.get_state_set().get_states())
+                logger.debug("role: %s", role)
+                logger.debug("states: %s", state_set.get_states())
 
                 children.append(
                     Child(
@@ -228,6 +237,52 @@ class AtspiBackend(HintsBackend):
                 children,
             )
 
+    def _build_match_rule(self):
+        """Build and cache the Atspi MatchRule from current config."""
+        self._match_rule = Atspi.MatchRule.new(
+            Atspi.StateSet.new(list(self.states)),
+            self.states_match_type,
+            self.attributes,
+            self.attributes_match_type,
+            list(self.roles),
+            self.roles_match_type,
+            [],
+            Atspi.CollectionMatchType.ALL,
+            False,
+        )
+
+    def _validate_state_match(self, state_set) -> bool:
+        """Check state match using a pre-fetched state_set (avoids D-Bus re-fetch)."""
+        if self.states_match_type in {
+            Atspi.CollectionMatchType.ALL,
+            Atspi.CollectionMatchType.EMPTY,
+        }:
+            return all(
+                state_set.contains(s) for s in self.states
+            )
+        elif self.states_match_type == Atspi.CollectionMatchType.ANY:
+            return any(
+                state_set.contains(s) for s in self.states
+            )
+        elif self.states_match_type == Atspi.CollectionMatchType.NONE:
+            return not any(
+                state_set.contains(s) for s in self.states
+            )
+        return False
+
+    def _validate_role_match(self, role) -> bool:
+        """Check role match using a pre-fetched role (avoids D-Bus re-fetch)."""
+        if self.roles_match_type in {
+            Atspi.CollectionMatchType.ALL,
+            Atspi.CollectionMatchType.EMPTY,
+        }:
+            return role in self.roles
+        elif self.roles_match_type == Atspi.CollectionMatchType.ANY:
+            return role in self.roles
+        elif self.roles_match_type == Atspi.CollectionMatchType.NONE:
+            return role not in self.roles
+        return False
+
     def get_children_of_interest(
         self,
         root: Atspi.Accessible,
@@ -241,23 +296,14 @@ class AtspiBackend(HintsBackend):
             found children coordinates.
         """
 
-        match_rule = Atspi.MatchRule.new(
-            Atspi.StateSet.new(list(self.states)),
-            self.states_match_type,
-            self.attributes,
-            self.attributes_match_type,
-            list(self.roles),
-            self.roles_match_type,
-            [],
-            Atspi.CollectionMatchType.ALL,
-            False,
-        )
+        if self._match_rule is None:
+            self._build_match_rule()
 
         collection = root.get_collection_iface()
 
         if collection and self.window_system.focused_window_extents:
             matches = collection.get_matches(
-                match_rule, Atspi.CollectionSortOrder.CANONICAL, 0, True
+                self._match_rule, Atspi.CollectionSortOrder.CANONICAL, 0, True
             )
 
             for match in matches:
