@@ -28,14 +28,13 @@ pub fn draw_hints(
     );
     cr.set_font_size(h.hint_font_size);
 
-    // Pre-compute bounding boxes for overlap detection
+    // Pre-compute bounding boxes
     let mut hint_rects: Vec<(String, usize, f64, f64, f64, f64)> = Vec::new();
 
     for (label, &child_idx) in hints {
         let child = &children[child_idx];
         let (rx, ry) = child.relative_position;
 
-        // Measure text width
         let extents = cr.text_extents(label).unwrap();
         let w = extents.width() + h.hint_width_padding;
         let rect_h = h.hint_height;
@@ -43,34 +42,76 @@ pub fn draw_hints(
         hint_rects.push((label.clone(), child_idx, rx, ry, w, rect_h));
     }
 
-    // Filter out hints whose labels don't match the currently typed prefix
+    // Filter to hints matching the typed prefix
     let visible: Vec<&(String, usize, f64, f64, f64, f64)> = hint_rects
         .iter()
         .filter(|(label, _, _, _, _, _)| label.starts_with(typed))
         .collect();
 
-    // Overlap filtering (greedy)
-    let overlap_threshold = h.hint_overlap_threshold / 100.0;
-    let mut kept: Vec<usize> = Vec::new();
+    if visible.is_empty() {
+        return;
+    }
 
-    for (i, item) in visible.iter().enumerate() {
-        let (_, _, x1, y1, w1, h1) = item;
-        let r1 = (*x1, *y1, x1 + w1, y1 + h1);
-
-        let overlaps = kept.iter().any(|&j| {
-            let (_, _, x2, y2, w2, h2) = visible[j];
-            let r2 = (*x2, *y2, x2 + w2, y2 + h2);
-            overlap_fraction(r1, r2) > overlap_threshold
-        });
-
-        if !overlaps {
-            kept.push(i);
+    // Group hints by their first character (zone)
+    let mut zone_groups: HashMap<char, Vec<usize>> = HashMap::new();
+    for (idx, (label, _, _, _, _, _)) in visible.iter().enumerate() {
+        if let Some(first_char) = label.chars().next() {
+            zone_groups.entry(first_char).or_default().push(idx);
         }
     }
 
-    // Draw each kept hint
-    for &idx in &kept {
-        let (ref label, _, rx, ry, w, rect_h) = *visible[idx];
+    let overlap_threshold = 0.1; // 10% overlap threshold
+    let mut kept: Vec<bool> = vec![true; visible.len()];
+
+    // Within each zone, cull overlapping hints
+    for zone_indices in zone_groups.values() {
+        if zone_indices.len() <= 1 {
+            continue;
+        }
+
+        // Sort by position (top-to-bottom, left-to-right) for consistent results
+        let mut sorted_indices = zone_indices.clone();
+        sorted_indices.sort_by(|&a, &b| {
+            let (_, _, x1, y1, _, _) = visible[a];
+            let (_, _, x2, y2, _, _) = visible[b];
+            y1.partial_cmp(&y2).unwrap_or(std::cmp::Ordering::Equal)
+                .then(x1.partial_cmp(&x2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        // Greedy culling within zone
+        for i in 0..sorted_indices.len() {
+            let idx_a = sorted_indices[i];
+            if !kept[idx_a] {
+                continue;
+            }
+            
+            let (_, _, x1, y1, w1, h1) = visible[idx_a];
+            let r1 = (*x1, *y1, x1 + w1, y1 + h1);
+            
+            // Check subsequent hints for overlap
+            for j in (i + 1)..sorted_indices.len() {
+                let idx_b = sorted_indices[j];
+                if !kept[idx_b] {
+                    continue;
+                }
+                
+                let (_, _, x2, y2, w2, h2) = visible[idx_b];
+                let r2 = (*x2, *y2, x2 + w2, y2 + h2);
+                
+                if overlap_fraction(r1, r2) > overlap_threshold {
+                    kept[idx_b] = false;
+                }
+            }
+        }
+    }
+
+    // Draw only kept hints
+    for (idx, item) in visible.iter().enumerate() {
+        if !kept[idx] {
+            continue;
+        }
+
+        let (ref label, _, rx, ry, w, rect_h) = **item;
 
         // Shadow
         if h.hint_shadow {
@@ -103,7 +144,7 @@ pub fn draw_hints(
 
         // Per-character text rendering
         let mut text_x = rx + h.hint_width_padding / 2.0;
-        let text_y = ry + rect_h * 0.75; // baseline approximation
+        let text_y = ry + rect_h * 0.75;
 
         for (ci, ch) in label.chars().enumerate() {
             let display_ch = if h.hint_upercase {
@@ -115,7 +156,6 @@ pub fn draw_hints(
             let ch_str = display_ch.to_string();
 
             if ci < typed.len() {
-                // Already-typed character → green
                 cr.set_source_rgba(
                     h.hint_pressed_font_r,
                     h.hint_pressed_font_g,
@@ -123,7 +163,6 @@ pub fn draw_hints(
                     h.hint_pressed_font_a,
                 );
             } else if ci == 0 {
-                // First character → red emphasis
                 cr.set_font_size(h.hint_font_size + h.hint_first_font_size_boost);
                 cr.set_source_rgba(
                     h.hint_first_font_r,
@@ -142,7 +181,6 @@ pub fn draw_hints(
             let char_ext = cr.text_extents(&ch_str).unwrap();
             text_x += char_ext.x_advance();
 
-            // Reset font size after first char
             if ci == 0 {
                 cr.set_font_size(h.hint_font_size);
             }

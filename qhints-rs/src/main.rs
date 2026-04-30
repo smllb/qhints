@@ -139,11 +139,18 @@ fn hint_mode(config: &config::Config, total_start: Instant) {
     let (x, y, width, height) = win_info.extents;
     if let Some(action) = overlay::show_overlay(config, &hint_map, &children, x, y, width, height) {
         log::debug!("Action: {:?}", action);
+        
         match action.action.as_str() {
             "click" | "hover" => {
-                if let Err(e) = mouse::click(action.x, action.y, action.button, action.repeat) {
-                    log::error!("Mouse click failed: {}", e);
-                }
+                // Spawn a background process to click after GTK fully exits
+                std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "xdotool mousemove {} {} click {}",
+                        action.x, action.y, action.button
+                    ))
+                    .spawn()
+                    .expect("Failed to spawn xdotool");
             }
             _ => {
                 log::debug!("Unhandled action: {}", action.action);
