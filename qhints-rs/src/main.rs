@@ -178,7 +178,7 @@ fn cull_and_relabel(
     let h = &config.hints;
     let (width, height) = window_size;
     
-    // Build rectangles for overlap detection
+    // Build rectangles and element info - SORT by position for consistency
     let mut items: Vec<(String, usize, f64, f64, f64, f64)> = Vec::new();
     for (label, &child_idx) in hints {
         let child = &children[child_idx];
@@ -188,108 +188,98 @@ fn cull_and_relabel(
         items.push((label.clone(), child_idx, rx, ry, w, hh));
     }
     
+    // Sort by position: top-to-bottom, left-to-right for deterministic results
+    items.sort_by(|a, b| {
+        let ay = a.3 + a.5 / 2.0; // y center
+        let by = b.3 + b.5 / 2.0;
+        ay.partial_cmp(&by).unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let ax = a.2 + a.4 / 2.0; // x center
+                let bx = b.2 + b.4 / 2.0;
+                ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    
     if items.is_empty() {
         return HashMap::new();
     }
     
-    // Calculate grid alignment scores for each item
-    let alignment_scores: Vec<f64> = items.iter().map(|item| {
-        let (_, _, x, y, w, h) = *item;
-        let cx = x + w / 2.0;
-        let cy = y + h / 2.0;
+    let mut keep = vec![true; items.len()];
+    
+    // First pass: identify strips of similar-sized elements
+    let row_tolerance = 15.0;
+    let size_tolerance = 1.5;
+    let mut in_strip = vec![false; items.len()];
+    
+    for i in 0..items.len() {
+        if in_strip[i] { continue; }
         
-        // Score based on how well this element aligns with others
-        let mut horizontal_alignments = 0;
-        let mut vertical_alignments = 0;
+        let (_, _, xi, yi, wi, hi) = items[i];
+        let cy_i = yi + hi / 2.0;
+        let area_i = wi * hi;
         
-        for other in &items {
-            let (_, _, ox, oy, ow, oh) = *other;
-            let ocx = ox + ow / 2.0;
-            let ocy = oy + oh / 2.0;
+        let mut row_siblings = vec![i];
+        for j in (i + 1)..items.len() {
+            let (_, _, xj, yj, wj, hj) = items[j];
+            let cy_j = yj + hj / 2.0;
+            let area_j = wj * hj;
             
-            // Check horizontal alignment (similar y)
-            if (cy - ocy).abs() < h * 1.5 && (cx - ocx).abs() > w * 0.5 {
-                horizontal_alignments += 1;
-            }
-            // Check vertical alignment (similar x)
-            if (cx - ocx).abs() < w * 1.5 && (cy - ocy).abs() > h * 0.5 {
-                vertical_alignments += 1;
+            if (cy_i - cy_j).abs() < row_tolerance 
+                && (hi - hj).abs() < row_tolerance
+                && (area_i / area_j).max(area_j / area_i) < size_tolerance {
+                row_siblings.push(j);
             }
         }
         
-        // Bonus for being part of aligned groups
-        (horizontal_alignments as f64 + vertical_alignments as f64) * 0.1 + 
-        // Bonus for larger elements (more important)
-        (w * h).sqrt() / 100.0
-    }).collect();
+        // If strip found (3+ similar elements in a row), mark all
+        if row_siblings.len() >= 2 {
+            for &sib in &row_siblings {
+                in_strip[sib] = true;
+                keep[sib] = true;
+            }
+        }
+    }
     
-    // Create scored indices and sort by quality
-    let mut scored_indices: Vec<(usize, f64)> = (0..items.len())
-        .map(|i| (i, alignment_scores[i]))
-        .collect();
-    
-    // Sort by score (highest first) but keep shorter labels as tiebreaker
-    scored_indices.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(items[a.0].0.len().cmp(&items[b.0].0.len()))
-    });
-    
-    // Cull using spatial grid with minimum distance
-    let min_distance = 30.0; // Minimum distance between hint centers
-    let mut keep = vec![true; items.len()];
-    
-    for &(i, _) in &scored_indices {
+    // Second pass: cull overlapping hints that aren't in strips
+    // Process in deterministic order: top-to-bottom, left-to-right
+    for i in 0..items.len() {
         if !keep[i] { continue; }
         
         let (_, _, x1, y1, w1, h1) = items[i];
-        let cx1 = x1 + w1 / 2.0;
-        let cy1 = y1 + h1 / 2.0;
         let r1 = (x1, y1, x1 + w1, y1 + h1);
         
-        for &(j, _) in &scored_indices {
-            if i == j || !keep[j] { continue; }
+        for j in (i + 1)..items.len() {
+            if !keep[j] { continue; }
+            
+            // Never cull strip elements
+            if in_strip[i] && in_strip[j] { continue; }
             
             let (_, _, x2, y2, w2, h2) = items[j];
-            let cx2 = x2 + w2 / 2.0;
-            let cy2 = y2 + h2 / 2.0;
             let r2 = (x2, y2, x2 + w2, y2 + h2);
             
-            // Check center distance
-            let dx = cx1 - cx2;
-            let dy = cy1 - cy2;
-            let distance = (dx * dx + dy * dy).sqrt();
-            
-            // Check overlap
             let ix1 = r1.0.max(r2.0);
             let iy1 = r1.1.max(r2.1);
             let ix2 = r1.2.min(r2.2);
             let iy2 = r1.3.min(r2.3);
             
-            let has_overlap = ix1 < ix2 && iy1 < iy2;
-            
-            // Remove if too close OR significantly overlapping
-            if distance < min_distance || (has_overlap && {
+            if ix1 < ix2 && iy1 < iy2 {
                 let intersection = (ix2 - ix1) * (iy2 - iy1);
                 let area1 = (r1.2 - r1.0) * (r1.3 - r1.1);
                 let area2 = (r2.2 - r2.0) * (r2.3 - r2.1);
                 let min_area = area1.min(area2);
-                min_area > 0.0 && intersection / min_area > 0.3
-            }) {
-                // Keep the higher-scored one
-                if alignment_scores[i] >= alignment_scores[j] {
+                
+                if min_area > 0.0 && intersection / min_area > 0.6 {
+                    // Deterministic choice: keep the one processed first (higher/top-left)
                     keep[j] = false;
-                } else {
-                    keep[i] = false;
-                    break;
                 }
             }
         }
     }
     
-    // Group kept children by zone
+    // Group kept children by zone - use BTreeMap for deterministic zone ordering
     let zone_keys = &crate::config::KEYBOARD_ZONES;
-    let mut zone_children: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    let mut zone_children: std::collections::BTreeMap<(usize, usize), Vec<usize>> = std::collections::BTreeMap::new();
+    
     for (i, _) in keep.iter().enumerate().filter(|(_, &k)| k) {
         let child_idx = items[i].1;
         let child = &children[child_idx];
@@ -306,9 +296,10 @@ fn cull_and_relabel(
             ay.partial_cmp(&by).unwrap_or(std::cmp::Ordering::Equal)
                 .then(ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal))
         });
+        bucket.dedup(); // Remove any duplicates
     }
     
-    // Relabel with zone-based 2-char labels only
+    // Relabel with zone-based 2-char labels
     let mut new_hints = HashMap::new();
     
     for (&(row, col), child_list) in &zone_children {
