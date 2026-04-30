@@ -52,54 +52,48 @@ pub fn draw_hints(
         return;
     }
 
-    // Group hints by their first character (zone)
-    let mut zone_groups: HashMap<char, Vec<usize>> = HashMap::new();
-    for (idx, (label, _, _, _, _, _)) in visible.iter().enumerate() {
-        if let Some(first_char) = label.chars().next() {
-            zone_groups.entry(first_char).or_default().push(idx);
-        }
-    }
-
-    let overlap_threshold = 0.1; // 10% overlap threshold
-    let mut kept: Vec<bool> = vec![true; visible.len()];
-
-    // Within each zone, cull overlapping hints
-    for zone_indices in zone_groups.values() {
-        if zone_indices.len() <= 1 {
-            continue;
-        }
-
-        // Sort by position (top-to-bottom, left-to-right) for consistent results
-        let mut sorted_indices = zone_indices.clone();
-        sorted_indices.sort_by(|&a, &b| {
+    // Very aggressive overlap culling - prefer shorter labels
+    let overlap_threshold = 0.05; // Only 5% overlap to trigger culling
+    
+    // Sort by label length (shortest first) then by position
+    let mut indices: Vec<usize> = (0..visible.len()).collect();
+    indices.sort_by(|&a, &b| {
+        let len_a = visible[a].0.len();
+        let len_b = visible[b].0.len();
+        len_a.cmp(&len_b).then_with(|| {
             let (_, _, x1, y1, _, _) = visible[a];
             let (_, _, x2, y2, _, _) = visible[b];
             y1.partial_cmp(&y2).unwrap_or(std::cmp::Ordering::Equal)
                 .then(x1.partial_cmp(&x2).unwrap_or(std::cmp::Ordering::Equal))
-        });
+        })
+    });
 
-        // Greedy culling within zone
-        for i in 0..sorted_indices.len() {
-            let idx_a = sorted_indices[i];
-            if !kept[idx_a] {
+    let mut kept = vec![true; visible.len()];
+
+    // First pass: keep only 1-char and 2-char hints, drop 3-char if they overlap
+    for &i in &indices {
+        if !kept[i] {
+            continue;
+        }
+        
+        let (_, _, x1, y1, w1, h1) = visible[i];
+        let r1 = (*x1, *y1, x1 + w1, y1 + h1);
+        
+        for &j in &indices {
+            if i == j || !kept[j] {
                 continue;
             }
             
-            let (_, _, x1, y1, w1, h1) = visible[idx_a];
-            let r1 = (*x1, *y1, x1 + w1, y1 + h1);
+            let (_, _, x2, y2, w2, h2) = visible[j];
+            let r2 = (*x2, *y2, x2 + w2, y2 + h2);
             
-            // Check subsequent hints for overlap
-            for j in (i + 1)..sorted_indices.len() {
-                let idx_b = sorted_indices[j];
-                if !kept[idx_b] {
-                    continue;
-                }
-                
-                let (_, _, x2, y2, w2, h2) = visible[idx_b];
-                let r2 = (*x2, *y2, x2 + w2, y2 + h2);
-                
-                if overlap_fraction(r1, r2) > overlap_threshold {
-                    kept[idx_b] = false;
+            if overlap_fraction(r1, r2) > overlap_threshold {
+                // Keep the shorter label
+                if visible[i].0.len() <= visible[j].0.len() {
+                    kept[j] = false;
+                } else {
+                    kept[i] = false;
+                    break;
                 }
             }
         }

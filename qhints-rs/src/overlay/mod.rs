@@ -85,7 +85,7 @@ pub fn show_overlay(
     // Key press handler
     let state_key = state.clone();
     let da_clone = drawing_area.clone();
-    window.connect_key_press_event(move |_, event| {
+    window.connect_key_press_event(move |w, event| {
         let keyval = event.keyval();
         let modifier = event.state();
 
@@ -102,17 +102,13 @@ pub fn show_overlay(
             let ch_lower = ch.to_lowercase().next().unwrap_or(ch);
             st.typed.push(ch_lower);
 
-            // Check for exact match
+            // With all 2-char hints, check for exact match
             if let Some(&child_idx) = st.hints.get(&st.typed) {
                 let child = &st.children[child_idx];
-                let click_x =
-                    child.absolute_position.0 as i32 + (child.width as i32 / 2);
-                let click_y =
-                    child.absolute_position.1 as i32 + (child.height as i32 / 2);
+                let click_x = child.absolute_position.0 as i32 + (child.width as i32 / 2);
+                let click_y = child.absolute_position.1 as i32 + (child.height as i32 / 2);
 
-                let (action, button, repeat) = if modifier
-                    .contains(gdk::ModifierType::CONTROL_MASK)
-                {
+                let (action, button, repeat) = if modifier.contains(gdk::ModifierType::CONTROL_MASK) {
                     ("hover".to_string(), 1u32, 1u32)
                 } else if modifier.contains(gdk::ModifierType::MOD1_MASK) {
                     ("grab".to_string(), 1, 1)
@@ -127,6 +123,14 @@ pub fn show_overlay(
                     button,
                     repeat,
                 });
+
+                // Release keyboard grab
+                if let Some(seat) = gtk::prelude::WidgetExt::display(w).default_seat() {
+                    seat.ungrab();
+                }
+                
+                // Hide window immediately
+                w.hide();
 
                 gtk::main_quit();
                 return gtk::glib::Propagation::Stop;
@@ -147,16 +151,16 @@ pub fn show_overlay(
         gtk::glib::Propagation::Stop
     });
 
-    // Grab keyboard on show
+    // Grab keyboard and pointer on show
     window.connect_show(move |w| {
         if let Some(seat) = gtk::prelude::WidgetExt::display(w).default_seat() {
             let _ = seat.grab(
                 &w.window().unwrap(),
-                gdk::SeatCapabilities::KEYBOARD,
+                gdk::SeatCapabilities::ALL,
                 true,
-                None, // cursor
-                None, // event
-                None, // prepare_func
+                None,
+                None,
+                None,
             );
         }
     });
