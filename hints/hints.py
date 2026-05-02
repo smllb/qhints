@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from itertools import product
-from math import ceil, log
 from time import time
 from typing import TYPE_CHECKING
 
@@ -166,6 +164,9 @@ def get_hints(
 
     if len(children) == 0:
         return hints
+
+    from itertools import product
+    from math import ceil, log
 
     # Fall back to sequential assignment when spatial mapping isn't possible.
     if window_size is None:

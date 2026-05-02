@@ -95,17 +95,27 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 - **All three stubs removed.** Socket's ~1.6ms import cost is accepted.
 - Hints overlay functional again. Fixed overhead: **~16ms → ~18ms** (net regression of ~2ms for correctness).
 
-## Current Timing Breakdown (~18ms fixed overhead + variable tree walk)
+### 13. `perf/further-optimizations` branch: further Python optimizations (~4–8ms savings)
+**Files:** `hints/utils.py`, `hints/backends/atspi.py`, `hints/hints.py`
+
+- **Marshal-cached config** (`utils.py`, ~2–3ms): Merged config dict serialized to `/tmp/qhints_config_<mtime>.dat` via `marshal`. On cache hit, skips JSON parse + deep-merge entirely (~0.3ms load vs ~3.5ms). Cache auto-invalidates when `config.json` mtime changes.
+- **Deferred `typing` import** (`atspi.py`, ~1ms): Replaced `from typing import TYPE_CHECKING, Literal` with `from __future__ import annotations` + explicit `TYPE_CHECKING = False` guard. `Literal` moved behind `TYPE_CHECKING`.
+- **Pre-built MatchRule** (`atspi.py`, ~0.5ms): `Atspi.MatchRule.new()` called once in `_build_match_rule()` and cached in `self._match_rule`, instead of rebuilding per `get_children_of_interest()` call.
+- **Cached role/state_set** (`atspi.py`, ~1–3ms on recursive fallback): In `recursively_get_children_of_interest()`, `get_role()` and `get_state_set()` results cached per node to avoid duplicate D-Bus roundtrips. New `_validate_state_match()` and `_validate_role_match()` methods accept pre-fetched values.
+- **Deferred itertools/math** (`hints.py`, ~0.2ms): `from itertools import product` and `from math import ceil, log` moved from module-level to inside `get_hints()`.
+- Estimated fixed overhead: **~18ms → ~14ms** (pending benchmark confirmation).
+
+## Current Timing Breakdown (~14ms estimated fixed overhead + variable tree walk)
 
 | Phase | Time | Notes |
 |---|---|---|
 | gi stubs install | ~0 ms | ModuleType subclasses/lambdas in-process |
-| config + utils import | ~3.5 ms | No GI at all |
-| hints.py / get_ws import | ~0.7 ms | Lazy logger, deferred stdlib |
+| config + utils import | ~0.5 ms | Marshal cache hit; ~3.5ms on first run |
+| hints.py / get_ws import | ~0.5 ms | Lazy logger, deferred stdlib + itertools/math |
 | X11 init | ~2.2 ms | Direct `LoadLibrary('libX11.so.6')`, no `ctypes.util` |
-| Atspi backend import | ~10.5 ms | gi._gi C-ext (~3ms) + Atspi typelib (~6ms) + socket (~1.6ms); asyncio/pkgutil/optparse all stubbed |
-| Atspi backend init | ~0 ms | Fast |
-| `get_children()` | variable | atspi tree walk (GTK preloading in parallel) |
+| Atspi backend import | ~9.5 ms | gi._gi C-ext (~3ms) + Atspi typelib (~6ms) + socket (~1.6ms); asyncio/pkgutil/optparse/typing all stubbed/deferred |
+| Atspi backend init | ~0 ms | Fast; MatchRule built lazily |
+| `get_children()` | variable | atspi tree walk (GTK preloading in parallel); cached role/state reduces D-Bus calls in recursive fallback |
 | GTK thread join | ~0 ms | Already finished during tree walk |
 | overlay import | ~0 ms | Cached from preload thread |
 | mouse + interceptor | ~1 ms | Only imported when needed |
@@ -115,10 +125,11 @@ Forked from [AlfredoSequeida/hints](https://github.com/AlfredoSequeida/hints). U
 1. **gi._gi C extension (~3ms)**: Core GObject type system init inside the compiled `.so`. Hard to reduce without patching the binary or pre-loading the shared library via `LD_PRELOAD`.
 2. **Atspi typelib loading (~6ms)**: Loading the Atspi introspection typelib + GLib typelib. Possibly reducible by pre-generating a cached Python binding or using ctypes for just the handful of Atspi functions needed.
 3. **socket (~1.6ms)**: `gi/overrides/GLib.py` imports socket at module level for a Win32-only `isinstance` check. Cannot stub it — `gi/_ossighelper.py` calls `socket.socketpair()` at runtime inside `Gtk.main()`. One option: monkey-patch `GLib.py` to not import socket, then provide only the `socketpair` symbol via a custom stub that delegates to the real `socket` loaded lazily.
-4. **config + utils (~3.5ms)**: JSON parse + deep-merge with default config. Could cache a compiled config object in `/tmp` (pickle or msgpack) across invocations.
+4. ~~**config + utils (~3.5ms)**~~: ✅ Solved — marshal cache reduces to ~0.5ms on warm runs.
 5. **X11 init (~2.2ms)**: `XOpenDisplay` + window property lookups. Minimal further savings without changing the approach.
 6. **Pre-warm daemon**: A persistent background process keeping GTK/Atspi loaded would eliminate all import costs — optimal but adds architectural complexity.
 7. **get_children() tree walk**: The variable phase. Could potentially cache the tree across invocations using a UNIX socket to a long-lived Atspi listener process.
+8. **Full Rust rewrite with async D-Bus**: Biggest possible win (~2.5–3× total speedup). See implementation plan for analysis.
 
 ## Config
 User config at `~/.config/hints/config.json`, deep-merged with `DEFAULT_CONFIG` in `hints/constants.py`.
