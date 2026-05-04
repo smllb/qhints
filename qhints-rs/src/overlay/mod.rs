@@ -82,6 +82,12 @@ pub fn show_overlay(
         gtk::glib::Propagation::Stop
     });
 
+    // Mouse click → dismiss overlay (safety net when grab fails)
+    drawing_area.connect_button_press_event(|_, _| {
+        gtk::main_quit();
+        gtk::glib::Propagation::Stop
+    });
+
     // Key press handler
     let state_key = state.clone();
     let da_clone = drawing_area.clone();
@@ -93,6 +99,9 @@ pub fn show_overlay(
 
         // Escape → exit
         if keyval.into_glib() as u32 == st.config.exit_key {
+            if let Some(seat) = gtk::prelude::WidgetExt::display(w).default_seat() {
+                seat.ungrab();
+            }
             gtk::main_quit();
             return gtk::glib::Propagation::Stop;
         }
@@ -151,18 +160,40 @@ pub fn show_overlay(
         gtk::glib::Propagation::Stop
     });
 
-    // Grab keyboard and pointer on show
+    // Grab keyboard on show
     window.connect_show(move |w| {
+        let gdk_win = match w.window() {
+            Some(win) => win,
+            None => {
+                log::error!("No GdkWindow available for grab");
+                return;
+            }
+        };
         if let Some(seat) = gtk::prelude::WidgetExt::display(w).default_seat() {
-            let _ = seat.grab(
-                &w.window().unwrap(),
-                gdk::SeatCapabilities::ALL,
+            let status = seat.grab(
+                &gdk_win,
+                gdk::SeatCapabilities::KEYBOARD,
                 true,
                 None,
                 None,
                 None,
             );
+            match status {
+                gdk::GrabStatus::Success => {
+                    log::debug!("Keyboard grab succeeded");
+                }
+                other => {
+                    log::warn!("Keyboard grab returned {:?}", other);
+                }
+            }
+        } else {
+            log::error!("No default seat available for grab");
         }
+    });
+
+    // Ensure main loop exits if window is destroyed externally
+    window.connect_destroy(|_| {
+        gtk::main_quit();
     });
 
     window.show_all();

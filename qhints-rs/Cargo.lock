@@ -1751,6 +1751,7 @@ dependencies = [
  "gtk",
  "image",
  "imageproc",
+ "libc",
  "log",
  "serde",
  "serde_json",
