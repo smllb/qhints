@@ -75,10 +75,6 @@ pub fn get_children(
     let mut visited = vec![false; (img_w * img_h) as usize];
     let mut children = Vec::new();
 
-    let min_dim = 8i32;
-    let max_w = (w as f32 * 0.5) as i32;
-    let max_h = (h as f32 * 0.5) as i32;
-
     // Scan top-to-bottom, left-to-right — deterministic ordering
     for start_y in 0..img_h {
         for start_x in 0..img_w {

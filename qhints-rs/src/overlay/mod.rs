@@ -2,7 +2,6 @@ pub mod drawing;
 
 use crate::child::Child;
 use crate::config::Config;
-use gtk::cairo::Context;
 use gdk::prelude::*;
 use gtk::prelude::*;
 use gtk::glib::translate::IntoGlib;
