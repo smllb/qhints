@@ -6,10 +6,8 @@ mod mouse;
 mod overlay;
 mod window_system;
 
-use crate::child::Child;
 use crate::window_system::WindowSystem;
 use clap::Parser;
-use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::time::Instant;
 
@@ -155,13 +153,8 @@ fn hint_mode(config: &config::Config, total_start: Instant) {
     // Compute hints
     let t = Instant::now();
     let (_, _, w, h) = win_info.extents;
-   let hint_map = hints::get_hints(&children, &config.alphabet, Some((w as f64, h as f64)));
-log::info!("hints before relabel: {}", hint_map.len());
-
-let hint_map = cull_and_relabel(config, &hint_map, &children, (w as f64, h as f64));
-
-log::info!("hints after relabel: {}", hint_map.len());
-    log::debug!("Total pre-overlay: {:?}", total_start.elapsed());
+    let hint_map = hints::get_hints(&children, &config.alphabet, Some((w as f64, h as f64)));
+    log::debug!("Hint computation: {:?} ({} hints)", t.elapsed(), hint_map.len());
 
     // Show overlay
     let (x, y, width, height) = win_info.extents;
@@ -185,70 +178,4 @@ log::info!("hints after relabel: {}", hint_map.len());
         }
     }
     // _lock drops here, releasing the flock
-}
-
-/// Cull overlapping hints and relabel survivors with zone-based 2-character labels
-fn cull_and_relabel(
-    config: &config::Config,
-    hints: &HashMap<String, usize>,
-    children: &[Child],
-    window_size: (f64, f64),
-) -> HashMap<String, usize> {
-    let alpha_chars: Vec<char> = config.alphabet.chars().collect();
-    let (width, height) = window_size;
-
-    // Sort all hints top-to-bottom, left-to-right for deterministic labeling
-    let mut items: Vec<(usize, f64, f64)> = hints
-        .values()
-        .map(|&child_idx| {
-            let (rx, ry) = children[child_idx].relative_position;
-            (child_idx, rx, ry)
-        })
-        .collect();
-
-    items.sort_by(|a, b| {
-        a.2.partial_cmp(&b.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
-
-    // Group by zone
-    let zone_keys = &crate::config::KEYBOARD_ZONES;
-    let mut zone_children: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
-        std::collections::BTreeMap::new();
-
-    for (child_idx, rx, ry) in &items {
-        let zone = get_zone(*rx, *ry, width, height);
-        zone_children.entry(zone).or_default().push(*child_idx);
-    }
-
-    // Relabel each zone with 2-char labels
-    let mut new_hints = HashMap::new();
-
-    for (&(row, col), child_list) in &zone_children {
-        let keys: Vec<char> = zone_keys[row][col].chars().collect();
-
-        let mut labels = Vec::new();
-        'outer: for &first in &keys {
-            for &second in &alpha_chars {
-                labels.push(format!("{}{}", first, second));
-                if labels.len() >= child_list.len() {
-                    break 'outer;
-                }
-            }
-        }
-
-        for (&child_idx, label) in child_list.iter().zip(labels.into_iter()) {
-            new_hints.insert(label, child_idx);
-        }
-    }
-
-    new_hints
-}
-fn get_zone(rx: f64, ry: f64, width: f64, height: f64) -> (usize, usize) {
-    let nx = if width > 0.0 { (rx / width).clamp(0.0, 1.0) } else { 0.5 };
-    let ny = if height > 0.0 { (ry / height).clamp(0.0, 1.0) } else { 0.5 };
-    let col = ((nx * 3.0) as usize).min(2);
-    let row = ((ny * 3.0) as usize).min(2);
-    (row, col)
 }

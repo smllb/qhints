@@ -28,7 +28,7 @@ pub fn draw_hints(
     );
     cr.set_font_size(h.hint_font_size);
 
-    // Pre-compute bounding boxes
+    // Pre-compute bounding boxes centered on child elements
     let mut hint_rects: Vec<(String, usize, f64, f64, f64, f64)> = Vec::new();
 
     for (label, &child_idx) in hints {
@@ -39,7 +39,11 @@ pub fn draw_hints(
         let w = extents.width() + h.hint_width_padding;
         let rect_h = h.hint_height;
 
-        hint_rects.push((label.clone(), child_idx, rx, ry, w, rect_h));
+        // Center hint on child (like Python version)
+        let hx = rx + child.width / 2.0 - w / 2.0;
+        let hy = ry + child.height / 2.0 - rect_h / 2.0;
+
+        hint_rects.push((label.clone(), child_idx, hx, hy, w, rect_h));
     }
 
     // Filter to hints matching the typed prefix
@@ -52,49 +56,33 @@ pub fn draw_hints(
         return;
     }
 
-    // Very aggressive overlap culling - prefer shorter labels
-    let overlap_threshold = 0.05; // Only 5% overlap to trigger culling
-    
-    // Sort by label length (shortest first) then by position
-    let mut indices: Vec<usize> = (0..visible.len()).collect();
-    indices.sort_by(|&a, &b| {
-        let len_a = visible[a].0.len();
-        let len_b = visible[b].0.len();
-        len_a.cmp(&len_b).then_with(|| {
-            let (_, _, x1, y1, _, _) = visible[a];
-            let (_, _, x2, y2, _, _) = visible[b];
-            y1.partial_cmp(&y2).unwrap_or(std::cmp::Ordering::Equal)
-                .then(x1.partial_cmp(&x2).unwrap_or(std::cmp::Ordering::Equal))
-        })
-    });
+    // Overlap culling using configurable threshold
+    // hint_overlap_threshold: 0 = show all, 100 = very aggressive
+    let overlap_limit = if h.hint_overlap_threshold == 0.0 {
+        f64::MAX
+    } else {
+        (100.0 - h.hint_overlap_threshold) / 100.0
+    };
 
     let mut kept = vec![true; visible.len()];
 
-    // First pass: keep only 1-char and 2-char hints, drop 3-char if they overlap
-    for &i in &indices {
+    for i in 0..visible.len() {
         if !kept[i] {
             continue;
         }
-        
         let (_, _, x1, y1, w1, h1) = visible[i];
         let r1 = (*x1, *y1, x1 + w1, y1 + h1);
-        
-        for &j in &indices {
-            if i == j || !kept[j] {
+
+        for j in (i + 1)..visible.len() {
+            if !kept[j] {
                 continue;
             }
-            
             let (_, _, x2, y2, w2, h2) = visible[j];
             let r2 = (*x2, *y2, x2 + w2, y2 + h2);
-            
-            if overlap_fraction(r1, r2) > overlap_threshold {
-                // Keep the shorter label
-                if visible[i].0.len() <= visible[j].0.len() {
-                    kept[j] = false;
-                } else {
-                    kept[i] = false;
-                    break;
-                }
+
+            if overlap_fraction(r1, r2) > overlap_limit {
+                // Deterministic: keep the one that comes first (top-left)
+                kept[j] = false;
             }
         }
     }
@@ -105,14 +93,14 @@ pub fn draw_hints(
             continue;
         }
 
-        let (ref label, _, rx, ry, w, rect_h) = **item;
+        let (ref label, _, hx, hy, w, rect_h) = **item;
 
         // Shadow
         if h.hint_shadow {
             draw_rounded_rect(
                 cr,
-                rx + h.hint_shadow_offset_x,
-                ry + h.hint_shadow_offset_y,
+                hx + h.hint_shadow_offset_x,
+                hy + h.hint_shadow_offset_y,
                 w,
                 rect_h,
                 h.hint_corner_radius,
@@ -122,7 +110,7 @@ pub fn draw_hints(
         }
 
         // Background
-        draw_rounded_rect(cr, rx, ry, w, rect_h, h.hint_corner_radius);
+        draw_rounded_rect(cr, hx, hy, w, rect_h, h.hint_corner_radius);
         cr.set_source_rgba(
             h.hint_background_r,
             h.hint_background_g,
@@ -137,8 +125,8 @@ pub fn draw_hints(
         let _ = cr.stroke();
 
         // Per-character text rendering
-        let mut text_x = rx + h.hint_width_padding / 2.0;
-        let text_y = ry + rect_h * 0.75;
+        let mut text_x = hx + h.hint_width_padding / 2.0;
+        let text_y = hy + rect_h * 0.75;
 
         for (ci, ch) in label.chars().enumerate() {
             let display_ch = if h.hint_upercase {
