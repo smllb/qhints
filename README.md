@@ -1,3 +1,4 @@
+# This repository will no longer be maintained, as i'm now working on [qhints-rs](https://github.com/smllb/qhints-rs), a full Rust rewrite of this project since it's faster.
 # qhints (quantum hints)
 
 ![...](https://imgur.com/dP3T5pG.png)
